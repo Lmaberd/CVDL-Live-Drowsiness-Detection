@@ -1,0 +1,6 @@
+{
+  "best": {
+    "val_acc": 0.9605734767025089,
+    "trial_name": "head0p0001_l40p0001_l30p001",
+    "state_dict": {
+      "conv1.weight": 
