@@ -1,0 +1,44 @@
+{
+  "config": {
+    "img_size": 224,
+    "batch_size": 32,
+    "test_size": 0.15,
+    "val_size": 0.1765,
+    "context_scale": 1.2,
+    "epochs": 15,
+    "lr_backbone": 0.0001,
+    "lr_heads": 0.001,
+    "weight_decay": 0.0001,
+    "w_drowsy": 1.0,
+    "w_eye": 0.5,
+    "w_mouth": 0.5,
+    "fusion_w_base": 0.6,
+    "fusion_w_eye": 0.25,
+    "fusion_w_mouth": 0.15
+  },
+  "best_epoch": 8,
+  "best_val_acc": 0.9623655913978495,
+  "test_acc_base": 0.9683544303797469,
+  "test_acc_fused": 0.9578059071729957,
+  "improvement": -0.010548523206751148,
+  "confusion_matrix_base": [
+    [
+      222,
+      12
+    ],
+    [
+      3,
+      237
+    ]
+  ],
+  "confusion_matrix_fused": [
+    [
+      217,
+      17
+    ],
+    [
+      3,
+      237
+    ]
+  ]
+}
