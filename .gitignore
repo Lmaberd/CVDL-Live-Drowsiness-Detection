@@ -1,0 +1,32 @@
+# 🧩 Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# 🧠 Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 🧰 IDE and editor folders
+.vscode/
+.idea/
+
+# 📦 Dependency and package folders
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 🔐 System and macOS files
+.DS_Store
+
+# 🧱 Logs and temp files
+*.log
+*.tmp
+
+# 📦 Jupyter notebook checkpoints
+.ipynb_checkpoints/
