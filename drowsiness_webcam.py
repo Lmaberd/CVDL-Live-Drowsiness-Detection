@@ -1,375 +1,264 @@
 #!/usr/bin/env python3
 # Pygame FULLSCREEN renderer (no OpenCV window).
-# Panels pinned to screen edges (no overlap with face) + smaller labels.
-# "Uncertain" ONLY shown with Eye labels (not Face, not Mouth).
+# Compact glass UI + face box (green=Alert, red=Drowsy).
 
 import sys, time, math
 from pathlib import Path
-import cv2
-import numpy as np
+import cv2, numpy as np, pygame
 from PIL import Image
-import pygame
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import torch, torch.nn as nn, torch.nn.functional as F
 from torchvision import models, transforms
 
-# ---------- Optional audio (continuous beeping while drowsy > 3s) ----------
-USE_SIMPLEAUDIO = False
+# ---------- Optional beep ----------
+USE_SIMPLEAUDIO=False
 try:
-    import simpleaudio as sa
-    USE_SIMPLEAUDIO = True
-except Exception:
-    USE_SIMPLEAUDIO = False
+    import simpleaudio as sa  # pip install simpleaudio
+    USE_SIMPLEAUDIO=True
+except Exception: pass
 
-def _build_beep_wave(sr=22050, freq=1000, dur=0.15, vol=0.35):
-    t = np.linspace(0, dur, int(sr*dur), endpoint=False)
-    wave = (vol*np.sin(2*math.pi*freq*t)).astype(np.float32)
-    audio = np.int16(np.clip(wave, -1, 1) * 32767)
-    return audio.tobytes(), sr
-
-_BEEP_WAV = None
-if USE_SIMPLEAUDIO:
-    _BEEP_WAV, _BEEP_SR = _build_beep_wave()
-
+def _build_beep_wave(sr=22050,freq=1100,dur=0.10,vol=0.35):
+    t=np.linspace(0,dur,int(sr*dur),endpoint=False)
+    wave=(vol*np.sin(2*math.pi*freq*t)).astype(np.float32)
+    audio=np.int16(np.clip(wave,-1,1)*32767)
+    return audio.tobytes(),sr
+if USE_SIMPLEAUDIO:_BEEP_WAV,_BEEP_SR=_build_beep_wave()
 def play_beep_nonblocking():
-    if USE_SIMPLEAUDIO and _BEEP_WAV is not None:
-        try:
-            sa.play_buffer(_BEEP_WAV, 1, 2, _BEEP_SR)
-        except Exception:
-            sys.stdout.write('\a'); sys.stdout.flush()
-    else:
-        sys.stdout.write('\a'); sys.stdout.flush()
+    if USE_SIMPLEAUDIO:
+        try: sa.play_buffer(_BEEP_WAV,1,2,_BEEP_SR)
+        except: sys.stdout.write('\a');sys.stdout.flush()
+    else: sys.stdout.write('\a');sys.stdout.flush()
 
-# -------------------- Device --------------------
-def get_best_device():
-    if torch.cuda.is_available(): return torch.device("cuda")
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): return torch.device("mps")
-    return torch.device("cpu")
-device = get_best_device()
+# ---------- Device ----------
+device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# -------------------- Model --------------------
+# ---------- Model ----------
 class MultitaskDrowsinessModel(nn.Module):
     def __init__(self, landmark_dim=18):
         super().__init__()
-        resnet = models.resnet18(weights=None)
-        self.backbone = nn.Sequential(*list(resnet.children())[:-1])
-        self.landmark_fc = nn.Sequential(
-            nn.Linear(landmark_dim, 64), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(64, 32), nn.ReLU()
-        )
-        comb = 512 + 32
-        self.drowsy_head = nn.Sequential(
-            nn.Linear(comb, 256), nn.ReLU(), nn.Dropout(0.4), nn.Linear(256, 2)   # [Drowsy(0), Alert(1)]
-        )
-        self.eye_head = nn.Sequential(
-            nn.Linear(comb, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 3)  # [Closed(0), Open(1), Uncertain(2)]
-        )
-        self.mouth_head = nn.Sequential(
-            nn.Linear(comb, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 3)  # [Closed(0), Yawn(1), Uncertain(2)]
-        )
-    def forward(self, x, landmarks):
-        f_img = self.backbone(x).flatten(1)
-        f_lm  = self.landmark_fc(landmarks)
-        z = torch.cat([f_img, f_lm], 1)
-        return self.drowsy_head(z), self.eye_head(z), self.mouth_head(z)
+        resnet=models.resnet18(weights=None)
+        self.backbone=nn.Sequential(*list(resnet.children())[:-1])
+        self.landmark_fc=nn.Sequential(
+            nn.Linear(landmark_dim,64),nn.ReLU(),nn.Dropout(0.3),
+            nn.Linear(64,32),nn.ReLU())
+        comb=512+32
+        self.drowsy_head=nn.Sequential(
+            nn.Linear(comb,256),nn.ReLU(),nn.Dropout(0.4),nn.Linear(256,2))
+        self.eye_head=nn.Sequential(
+            nn.Linear(comb,128),nn.ReLU(),nn.Dropout(0.3),nn.Linear(128,3))
+        self.mouth_head=nn.Sequential(
+            nn.Linear(comb,128),nn.ReLU(),nn.Dropout(0.3),nn.Linear(128,3))
+    def forward(self,x,lm):
+        f_img=self.backbone(x).flatten(1)
+        f_lm=self.landmark_fc(lm)
+        z=torch.cat([f_img,f_lm],1)
+        return self.drowsy_head(z),self.eye_head(z),self.mouth_head(z)
 
 def find_checkpoint():
-    script_dir = Path(__file__).resolve().parent
+    script=Path(__file__).resolve().parent
     for p in [
-        script_dir / "model2_best.pth",
-        script_dir / "model2_multitask" / "model2_best.pth",
-        script_dir.parent / "model2_multitask" / "model2_best.pth",
-        Path.cwd() / "model2_multitask" / "model2_best.pth",
-        Path.cwd() / "model" / "model2_multitask" / "model2_best.pth",
+        script/"model2_best.pth",
+        script/"model2_multitask"/"model2_best.pth",
+        script.parent/"model2_multitask"/"model2_best.pth",
+        Path.cwd()/"model2_multitask"/"model2_best.pth",
+        Path.cwd()/"model"/"model2_multitask"/"model2_best.pth",
     ]:
         if p.exists(): return p
     sys.exit("Checkpoint not found.")
-def load_model():
-    model = MultitaskDrowsinessModel().to(device)
-    ckpt_path = find_checkpoint()
-    state = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    print(f"✅ Loaded checkpoint: {ckpt_path} on {device}")
-    return model
 
-# -------------------- MediaPipe --------------------
+def load_model():
+    m=MultitaskDrowsinessModel().to(device)
+    ck=find_checkpoint()
+    state=torch.load(ck,map_location=device)
+    m.load_state_dict(state,strict=True)
+    m.eval()
+    print(f"✅ Loaded checkpoint: {ck}")
+    return m
+
+# ---------- MediaPipe ----------
 try:
     import mediapipe as mp
 except Exception:
-    sys.exit("Please install mediapipe: python3 -m pip install mediapipe")
+    sys.exit("Please install mediapipe: pip install mediapipe")
+mp_face_mesh=mp.solutions.face_mesh
+face_mesh_full=mp_face_mesh.FaceMesh(static_image_mode=False,max_num_faces=1,min_detection_confidence=0.5)
+face_mesh_static=mp_face_mesh.FaceMesh(static_image_mode=True,max_num_faces=1,min_detection_confidence=0.5)
+LM_LEFT_EYE=[33,160,158,133,153,144]
+LM_RIGHT_EYE=[362,385,387,263,373,380]
+LM_MOUTH=[61,291,0,17,39,269]
+LM_18=LM_LEFT_EYE+LM_RIGHT_EYE+LM_MOUTH
 
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh_full   = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
-face_mesh_static = mp_face_mesh.FaceMesh(static_image_mode=True,  max_num_faces=1, min_detection_confidence=0.5)
-
-LM_LEFT_EYE  = [33, 160, 158, 133, 153, 144]
-LM_RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-LM_MOUTH     = [61, 291, 0, 17, 39, 269]
-LM_18 = LM_LEFT_EYE + LM_RIGHT_EYE + LM_MOUTH
-
-# -------------------- Transforms --------------------
-IMG_SIZE = 224
-eval_tfm = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+# ---------- Transforms ----------
+IMG_SIZE=224
+eval_tfm=transforms.Compose([
+    transforms.Resize((IMG_SIZE,IMG_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
 
-# -------------------- Geometry helpers --------------------
-def clamp(v, lo, hi): return max(lo, min(hi, v))
-def bbox_from_points(pts_px, pad_scale, w, h):
-    x_min, y_min = float(pts_px[:,0].min()), float(pts_px[:,1].min())
-    x_max, y_max = float(pts_px[:,0].max()), float(pts_px[:,1].max())
-    bw, bh = x_max - x_min, y_max - y_min
-    px = (pad_scale - 1.0) * bw / 2.0
-    py = (pad_scale - 1.0) * bh / 2.0
-    x1, y1 = int(clamp(x_min - px, 0, w-1)), int(clamp(y_min - py, 0, h-1))
-    x2, y2 = int(clamp(x_max + px, 1, w)),   int(clamp(y_max + py, 1, h))
-    return x1, y1, x2, y2
-def union_boxes(b1, b2):
-    return (min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3]))
-def face_bbox_from_all_points(pts_px, w, h, scale=1.20):
-    x_min, y_min = float(pts_px[:,0].min()), float(pts_px[:,1].min())
-    x_max, y_max = float(pts_px[:,0].max()), float(pts_px[:,1].max())
-    bw, bh = x_max - x_min, y_max - y_min
-    cx, cy = x_min + bw/2.0, y_min + bh/2.0
-    bw2, bh2 = bw*scale, bh*scale
-    x1, y1 = int(clamp(cx - bw2/2, 0, w-1)), int(clamp(cy - bh2/2, 0, h-1))
-    x2, y2 = int(clamp(cx + bw2/2, 1, w)),   int(clamp(cy + bh2/2, 1, h))
-    return x1, y1, x2, y2
+# ---------- Colors / UI scales ----------
+WHITE=(245,245,245);GREEN=(60,200,60);RED=(235,80,80)
+CYAN=(255,255,80);MAG=(255,100,200);AMBER=(60,205,255)
+GLASS=(24,24,28);BORDER=(85,85,90);SHADOW=(0,0,0)
+TITLE_SCALE=0.46;LABEL_SCALE=0.40;VALUE_SCALE=0.38
+SIDEBAR_W=180;CARD_GAP=6;CARD_PAD=8;BAR_H=7
 
-# -------------------- Prediction --------------------
+# ---------- Helpers ----------
 def extract_18y_from_crop(crop_bgr):
-    img_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-    res = face_mesh_static.process(img_rgb)
-    if not res.multi_face_landmarks:
-        return np.zeros(18, dtype=np.float32)
-    lms = res.multi_face_landmarks[0].landmark
-    ys = [lms[idx].y for idx in LM_18]
-    return np.array(ys, dtype=np.float32)
+    img_rgb=cv2.cvtColor(crop_bgr,cv2.COLOR_BGR2RGB)
+    res=face_mesh_static.process(img_rgb)
+    if not res.multi_face_landmarks: return np.zeros(18,dtype=np.float32)
+    lms=res.multi_face_landmarks[0].landmark
+    ys=[lms[idx].y for idx in LM_18];return np.array(ys,dtype=np.float32)
 
-def prepare_img_tensor(crop_bgr):
-    pil = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+def prepare_img_tensor(crop):
+    pil=Image.fromarray(cv2.cvtColor(crop,cv2.COLOR_BGR2RGB))
     return eval_tfm(pil).unsqueeze(0).to(device)
 
-def predict_on_frame(model, frame_bgr):
-    h, w = frame_bgr.shape[:2]
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    res = face_mesh_full.process(rgb)
+def face_bbox_from_all_points(pts,w,h,scale=1.2):
+    x_min,y_min=float(pts[:,0].min()),float(pts[:,1].min())
+    x_max,y_max=float(pts[:,0].max()),float(pts[:,1].max())
+    bw,bh=x_max-x_min,y_max-y_min;cx,cy=x_min+bw/2,y_min+bh/2
+    bw2,bh2=bw*scale,bh*scale
+    x1,y1=int(max(cx-bw2/2,0)),int(max(cy-bh2/2,0))
+    x2,y2=int(min(cx+bw2/2,w)),int(min(cy+bh2/2,h))
+    return x1,y1,x2,y2
+
+def rounded_rect(img,tl,br,color,radius=7):
+    x1,y1=tl;x2,y2=br;r=max(2,min(radius,min(x2-x1,y2-y1)//4))
+    overlay=img.copy()
+    cv2.rectangle(overlay,(x1+r,y1),(x2-r,y2),color,-1)
+    cv2.rectangle(overlay,(x1,y1+r),(x2,y2-r),color,-1)
+    for cx,cy in [(x1+r,y1+r),(x2-r,y1+r),(x1+r,y2-r),(x2-r,y2-r)]:
+        cv2.circle(overlay,(cx,cy),r,color,-1)
+    return overlay
+
+def draw_card(frame,x,y,w,h,title):
+    shadow=frame.copy()
+    cv2.rectangle(shadow,(x+2,y+2),(x+w+2,y+h+2),SHADOW,-1)
+    cv2.addWeighted(shadow,0.22,frame,0.78,0,frame)
+    overlay=rounded_rect(frame,(x,y),(x+w,y+h),GLASS,8)
+    cv2.addWeighted(overlay,0.84,frame,0.16,0,frame)
+    cv2.rectangle(frame,(x,y),(x+w,y+h),BORDER,1)
+    cv2.putText(frame,title,(x+CARD_PAD,y+CARD_PAD+14),
+                cv2.FONT_HERSHEY_SIMPLEX,TITLE_SCALE,WHITE,1,cv2.LINE_AA)
+
+def bar_line(frame,x,y,w,label,val,color):
+    cv2.putText(frame,label,(x,y),cv2.FONT_HERSHEY_SIMPLEX,LABEL_SCALE,WHITE,1,cv2.LINE_AA)
+    yb=y+3
+    cv2.rectangle(frame,(x,yb),(x+w,yb+BAR_H),(70,70,70),-1)
+    bw=int(w*np.clip(val,0,1))
+    cv2.rectangle(frame,(x,yb),(x+bw,yb+BAR_H),color,-1)
+    cv2.rectangle(frame,(x,yb),(x+w,yb+BAR_H),(105,105,110),1)
+    cv2.putText(frame,f"{val*100:.1f}%",(x+w-48,y+BAR_H+10),
+                cv2.FONT_HERSHEY_SIMPLEX,VALUE_SCALE,WHITE,1,cv2.LINE_AA)
+
+# ---------- Prediction ----------
+def predict_on_frame(model,frame):
+    h,w=frame.shape[:2]
+    rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+    res=face_mesh_full.process(rgb)
     if not res.multi_face_landmarks:
-        return "No face", None, None, None, None, None
-    mesh = res.multi_face_landmarks[0].landmark
-    pts = np.array([[lm.x * w, lm.y * h] for lm in mesh], dtype=np.float32)
-
-    # Face/region boxes
-    fx1, fy1, fx2, fy2 = face_bbox_from_all_points(pts, w, h, 1.20)
-    crop = frame_bgr[fy1:fy2, fx1:fx2]
-    if crop.size == 0:
-        return "No face", None, None, None, None, None
-
-    left_pts, right_pts, mouth_pts = pts[LM_LEFT_EYE], pts[LM_RIGHT_EYE], pts[LM_MOUTH]
-    lx1, ly1, lx2, ly2 = bbox_from_points(left_pts, 1.4, w, h)
-    rx1, ry1, rx2, ry2 = bbox_from_points(right_pts, 1.4, w, h)
-    eyes_box = union_boxes((lx1,ly1,lx2,ly2), (rx1,ry1,rx2,ry2))
-    mx1, my1, mx2, my2 = bbox_from_points(mouth_pts, 1.55, w, h)
-    region_boxes = {"eyes": eyes_box, "mouth": (mx1,my1,mx2,my2)}
-
-    # Model inputs
-    lm18 = extract_18y_from_crop(crop)
-    img_t, lm_t = prepare_img_tensor(crop), torch.from_numpy(lm18).unsqueeze(0).to(device)
-
-    # Inference
+        return "No face",None,None,{"Drowsy":0.0,"Alert":1.0},{
+            "eyes":{"Eyes Open":0.0,"Eyes Closed":0.0,"Uncertain":0.0},
+            "mouth":{"Mouth Closed":0.0,"Yawn":0.0}}
+    mesh=res.multi_face_landmarks[0].landmark
+    pts=np.array([[lm.x*w,lm.y*h] for lm in mesh],dtype=np.float32)
+    x1,y1,x2,y2=face_bbox_from_all_points(pts,w,h)
+    crop=frame[y1:y2,x1:x2]
+    if crop.size==0: return "No face",None,(x1,y1,x2,y2),{"Drowsy":0.0,"Alert":1.0},{
+        "eyes":{"Eyes Open":0.0,"Eyes Closed":0.0,"Uncertain":0.0},
+        "mouth":{"Mouth Closed":0.0,"Yawn":0.0}}
+    lm18=extract_18y_from_crop(crop)
+    img_t,lm_t=prepare_img_tensor(crop),torch.from_numpy(lm18).unsqueeze(0).to(device)
     with torch.no_grad():
-        logits_d, logits_e, logits_m = model(img_t, lm_t)
-        probs_d = F.softmax(logits_d, dim=1)[0].cpu().numpy()   # [Drowsy, Alert]
-        probs_e = F.softmax(logits_e, dim=1)[0].cpu().numpy()   # [Closed, Open, Uncertain]
-        probs_m = F.softmax(logits_m, dim=1)[0].cpu().numpy()   # [Closed, Yawn, Uncertain]
+        d,e,m=model(img_t,lm_t)
+        pd,pe,pm=F.softmax(d,1)[0].cpu().numpy(),F.softmax(e,1)[0].cpu().numpy(),F.softmax(m,1)[0].cpu().numpy()
+    confs={"Drowsy":float(pd[0]),"Alert":float(pd[1])}
+    rconfs={"eyes":{"Eyes Open":float(pe[1]),"Eyes Closed":float(pe[0]),"Uncertain":float(pe[2])},
+            "mouth":{"Mouth Closed":float(pm[0]),"Yawn":float(pm[1])}}
+    pred="Alert" if np.argmax(pd)==1 else "Drowsy"
+    return pred,(x1,y1,x2,y2),confs,rconfs
 
-    pred_id = int(np.argmax(probs_d))
-    label = "Alert" if pred_id == 1 else "Drowsy"
+# ---------- Sidebar ----------
+def draw_sidebar(frame,state,dt,fps,confs,rconfs):
+    x0,y=8,8;w=SIDEBAR_W
+    h=56;draw_card(frame,x0,y,w,h,"Status")
+    c=RED if state=="Drowsy" else (AMBER if state=="No face" else GREEN)
+    cv2.putText(frame,state,(x0+CARD_PAD,y+CARD_PAD+30),cv2.FONT_HERSHEY_SIMPLEX,0.52,c,2)
+    cv2.putText(frame,f"Time {dt:.1f}s",(x0+CARD_PAD,y+CARD_PAD+46),cv2.FONT_HERSHEY_SIMPLEX,0.40,WHITE,1)
+    y+=h+CARD_GAP
+    h=82;draw_card(frame,x0,y,w,h,"Face")
+    bar_line(frame,x0+CARD_PAD,y+CARD_PAD+22,w-2*CARD_PAD,"Alert",confs["Alert"],GREEN)
+    bar_line(frame,x0+CARD_PAD,y+CARD_PAD+44,w-2*CARD_PAD,"Drowsy",confs["Drowsy"],RED)
+    y+=h+CARD_GAP
+    h=104;draw_card(frame,x0,y,w,h,"Eyes")
+    bar_line(frame,x0+CARD_PAD,y+CARD_PAD+22,w-2*CARD_PAD,"Open",rconfs["eyes"]["Eyes Open"],CYAN)
+    bar_line(frame,x0+CARD_PAD,y+CARD_PAD+44,w-2*CARD_PAD,"Closed",rconfs["eyes"]["Eyes Closed"],AMBER)
+    bar_line(frame,x0+CARD_PAD,y+CARD_PAD+66,w-2*CARD_PAD,"Uncertain",rconfs["eyes"]["Uncertain"],WHITE)
+    y+=h+CARD_GAP
+    h=82;draw_card(frame,x0,y,w,h,"Mouth")
+    bar_line(frame,x0+CARD_PAD,y+CARD_PAD+22,w-2*CARD_PAD,"Closed",rconfs["mouth"]["Mouth Closed"],GREEN)
+    bar_line(frame,x0+CARD_PAD,y+CARD_PAD+44,w-2*CARD_PAD,"Yawn",rconfs["mouth"]["Yawn"],MAG)
+    y+=h+CARD_GAP
+    h=46;draw_card(frame,x0,y,w,h,"Performance")
+    cv2.putText(frame,f"FPS {fps:.1f}",(x0+CARD_PAD,y+CARD_PAD+26),
+                cv2.FONT_HERSHEY_SIMPLEX,0.48,WHITE,2)
 
-    # Overall face confidences (no 'Uncertain' here)
-    confs = {
-        "Drowsy": float(probs_d[0]),
-        "Alert":  float(probs_d[1]),
-    }
-
-    # Region-wise confidences; 'Uncertain' ONLY for eyes
-    region_confs = {
-        "eyes": {
-            "Eyes Open":   float(probs_e[1]),
-            "Eyes Closed": float(probs_e[0]),
-            "Uncertain":   float(probs_e[2]),
-        },
-        "mouth": {
-            "Mouth Closed": float(probs_m[0]),
-            "Yawn":         float(probs_m[1]),
-            # NO 'Uncertain' displayed for mouth per request
-        },
-    }
-    return label, pred_id, (fx1, fy1, fx2, fy2), confs, region_boxes, region_confs
-
-# -------------------- Visual helpers --------------------
-WHITE=(255,255,255); GREEN=(60,200,60); RED=(0,0,230)
-CYAN=(255,255,0); MAG=(255,0,180); AMBER=(0,200,255)
-
-def draw_box(f, b, c, t=2): cv2.rectangle(f, (b[0],b[1]), (b[2],b[3]), c, t)
-def draw_label(f, text, org, color=WHITE, scale=0.8, thick=2):
-    cv2.putText(f, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
-def draw_status_bottom_left(f, s, d):
-    H,_ = f.shape[:2]; base=H-40
-    c=RED if s=="Drowsy" else GREEN
-    cv2.putText(f,f"State: {s}",(20,base),cv2.FONT_HERSHEY_SIMPLEX,1.0,c,3)
-    cv2.putText(f,f"Drowsy Time: {d:.1f}s",(20,base+30),cv2.FONT_HERSHEY_SIMPLEX,0.9,WHITE,2)
-def draw_fps(f,fps): draw_label(f,f"FPS {fps:.1f}",(20,40),WHITE,0.8,2)
-
-# -------------------- Panel drawing (PINNED TO SCREEN EDGE) --------------------
-def draw_panel_aligned(frame, box, lines, side="right", bar_w=220):
-    """
-    Draw a compact panel pinned to the screen edge (so it never overlaps the face).
-    side = 'right' pins at right edge; 'left' pins at left edge.
-    """
-    H,W=frame.shape[:2]
-    pad=10; text_h=18; gap=8; bar_h=12
-    panel_h=pad*2+len(lines)*(text_h+bar_h+gap)-gap; panel_w=bar_w+2*pad
-
-    # Pin to the screen edge
-    if side=="right":
-        px1=W-panel_w-8
-    else:
-        px1=8
-    # Vertically center to the target box midline
-    x1,y1,x2,y2=box
-    mid_y=(y1+y2)//2
-    py1=max(8,min(int(mid_y-panel_h/2),H-panel_h-8))
-    px2,py2=px1+panel_w,py1+panel_h
-
-    # Panel body
-    overlay=frame.copy()
-    cv2.rectangle(overlay,(px1,py1),(px2,py2),(20,20,20),-1)
-    cv2.addWeighted(overlay,0.6,frame,0.4,0,frame)
-    cv2.rectangle(frame,(px1,py1),(px2,py2),WHITE,1)
-
-    # Bars
-    x_text,y=px1+pad,py1+pad+14
-    for label,value,color in lines:
-        cv2.putText(frame,f"{label}: {value*100:.1f}%",(x_text,y),cv2.FONT_HERSHEY_SIMPLEX,0.8,WHITE,2)
-        yb=y+6
-        cv2.rectangle(frame,(x_text,yb),(px2-pad,yb+bar_h),(80,80,80),-1)
-        bw=int((px2-pad-x_text)*float(np.clip(value,0,1)))
-        cv2.rectangle(frame,(x_text,yb),(x_text+bw,yb+bar_h),color,-1)
-        cv2.rectangle(frame,(x_text,yb),(px2-pad,yb+bar_h),WHITE,1)
-        y+=text_h+bar_h+gap
-
-    # Leader line from face box to panel edge
-    bx1,by1,bx2,by2=box
-    p_src=(bx2, (by1+by2)//2) if side=="right" else (bx1, (by1+by2)//2)
-    p_dst=(px1, (py1+py2)//2) if side=="right" else (px2, (py1+py2)//2)
-    cv2.line(frame,p_src,p_dst,WHITE,2)
-
-# -------------------- Pygame display helpers --------------------
-def scale_fit_surface(surface, target_w, target_h):
-    """Scale the camera frame to fit screen exactly (no clipping or grey bars)."""
-    sw, sh = surface.get_size()
-    s = min(target_w / sw, target_h / sh)
-    nw, nh = int(sw * s), int(sh * s)
-    scaled = pygame.transform.smoothscale(surface, (nw, nh))
-    x = (target_w - nw) // 2
-    y = (target_h - nh) // 2
-    final = pygame.Surface((target_w, target_h))
-    final.fill((0, 0, 0))
-    final.blit(scaled, (x, y))
+# ---------- Pygame ----------
+def scale_fit_surface(surface,W,H):
+    sw,sh=surface.get_size();s=min(W/sw,H/sh)
+    nw,nh=int(sw*s),int(sh*s)
+    scaled=pygame.transform.smoothscale(surface,(nw,nh))
+    x=(W-nw)//2;y=(H-nh)//2
+    final=pygame.Surface((W,H))
+    final.fill((0,0,0))
+    final.blit(scaled,(x,y))
     return final
 
-# -------------------- Main --------------------
+# ---------- Main ----------
 def main():
-    model = load_model()
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened(): sys.exit("Cannot open webcam.")
-    pygame.init()
-    screen = pygame.display.set_mode((0,0), pygame.FULLSCREEN)
-    screen_w, screen_h = screen.get_size()
-    clock = pygame.time.Clock()
-
-    drowsy_time=0.0; last_beep=0.0
-    BEEP_INTERVAL=0.25
-    BEEP_START_SEC=3.0
-    DROWSY_THRESH=0.60
-    CONF_MARGIN=0.15   # require separation to consider it confident
-    fps=0.0; t_last=time.time()
+    model=load_model()
+    cap=cv2.VideoCapture(0)
+    if not cap.isOpened(): sys.exit("No webcam.")
+    pygame.init();screen=pygame.display.set_mode((0,0),pygame.FULLSCREEN)
+    W,H=screen.get_size();clock=pygame.time.Clock()
+    dt,last_beep=0.0,0.0;BEEP_INTERVAL=0.25;BEEP_START_SEC=3.0
+    DROWSY_THRESH=0.60;CONF_MARGIN=0.15;fps=0.0;t_last=time.time()
 
     while True:
         for e in pygame.event.get():
             if e.type==pygame.QUIT: return
             if e.type==pygame.KEYDOWN and e.key in (pygame.K_q,pygame.K_ESCAPE): return
-
         ok,frame=cap.read()
         if not ok: break
         work=frame.copy()
+        t_now=time.time();dt_frame=t_now-t_last;t_last=t_now
+        if dt_frame>0: fps=0.9*fps+0.1*(1.0/dt_frame) if fps>0 else (1.0/dt_frame)
+        label,face_box,confs,rconfs=predict_on_frame(model,work)
 
-        t_now=time.time(); dt=t_now-t_last; t_last=t_now
-        if dt>0: fps=0.9*fps+0.1*(1.0/dt) if fps>0 else (1.0/dt)
+        if face_box is not None:
+            x1,y1,x2,y2=face_box
+            color=GREEN if label=="Alert" else RED
+            cv2.rectangle(work,(x1,y1),(x2,y2),color,2)
 
-        label,pred,face_box,confs,regions,rconfs=predict_on_frame(model,work)
-
-        if pred is None:
-            draw_label(work,"No face",(30,80),AMBER,0.9,2)
-            draw_fps(work,fps); draw_status_bottom_left(work,"Alert",0.0)
+        if label=="No face":
+            state="No face";dt=0.0
         else:
-            dprob=confs["Drowsy"]
-            margin=abs(confs["Drowsy"] - confs["Alert"])
-            confident = (margin >= CONF_MARGIN)
-            active = (dprob >= DROWSY_THRESH) and confident
-
+            dprob=confs["Drowsy"];margin=abs(confs["Drowsy"]-confs["Alert"])
+            confident=(margin>=CONF_MARGIN);active=(dprob>=DROWSY_THRESH and confident)
             if active:
-                drowsy_time+=dt
-                if drowsy_time>=BEEP_START_SEC and (t_now-last_beep)>=BEEP_INTERVAL:
-                    play_beep_nonblocking(); last_beep=t_now
-            else:
-                drowsy_time=0.0
+                dt+=dt_frame
+                if dt>=BEEP_START_SEC and (t_now-last_beep)>=BEEP_INTERVAL:
+                    play_beep_nonblocking();last_beep=t_now
+            else: dt=0.0
+            state="Drowsy" if active else "Alert"
 
-            color_face=GREEN if pred==1 else RED
-            draw_box(work,face_box,color_face,2)
-            draw_box(work,regions["eyes"],CYAN,2)
-            draw_box(work,regions["mouth"],MAG,2)
-
-            # Face panel (LEFT EDGE): Alert vs Drowsy only
-            draw_panel_aligned(
-                work, face_box,
-                [("Alert",  confs["Alert"],  GREEN),
-                 ("Drowsy", dprob,           RED)],
-                side="left", bar_w=220
-            )
-
-            # Eyes panel (RIGHT EDGE): Open, Closed, Uncertain
-            draw_panel_aligned(
-                work, regions["eyes"],
-                [("Eyes Open",   rconfs["eyes"]["Eyes Open"],   CYAN),
-                 ("Eyes Closed", rconfs["eyes"]["Eyes Closed"], AMBER),
-                 ("Uncertain",   rconfs["eyes"]["Uncertain"],   WHITE)],
-                side="right", bar_w=220
-            )
-
-            # Mouth panel (LEFT EDGE by mouth box midline): Closed, Yawn (no Uncertain)
-            draw_panel_aligned(
-                work, regions["mouth"],
-                [("Mouth Closed", rconfs["mouth"]["Mouth Closed"], GREEN),
-                 ("Yawn",         rconfs["mouth"]["Yawn"],         MAG)],
-                side="left", bar_w=220
-            )
-
-            draw_status_bottom_left(work,"Drowsy" if active else "Alert",drowsy_time)
-            draw_fps(work,fps)
-
+        draw_sidebar(work,state,dt,fps,confs,rconfs)
         rgb=cv2.cvtColor(work,cv2.COLOR_BGR2RGB)
-        frame_surf=pygame.image.frombuffer(rgb.tobytes(),(rgb.shape[1],rgb.shape[0]),'RGB')
-        fitted=scale_fit_surface(frame_surf,screen_w,screen_h)
-        screen.blit(fitted,(0,0)); pygame.display.flip(); clock.tick(60)
+        surf=pygame.image.frombuffer(rgb.tobytes(),(rgb.shape[1],rgb.shape[0]),'RGB')
+        fitted=scale_fit_surface(surf,W,H)
+        screen.blit(fitted,(0,0));pygame.display.flip();clock.tick(60)
 
-    cap.release(); pygame.quit(); print("🛑 Stopped (pygame).")
+    cap.release();pygame.quit();print("🛑 Stopped.")
 
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
