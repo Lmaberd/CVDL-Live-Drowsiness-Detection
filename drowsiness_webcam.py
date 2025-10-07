@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# Panels aligned with boxes (same Y-center). Horizontal leader lines only.
-# Panels sit beside boxes with gap; no overlap. Bottom-left status display.
+# Panels anchored OUTSIDE the face box; leader lines point to regions.
+# Horizontal leader lines only. Bottom-left status display.
 # Drowsy timer (raw prob >= 0.60). Continuous beep after 3s.
 
 import sys, time, math
 from pathlib import Path
+from typing import Tuple, Dict, Optional
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -14,8 +16,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models, transforms
 
-# ---------- Optional audio (continuous beeping while drowsy > 3s) ----------
+# ---------- Beep (winsound -> simpleaudio -> console fallback) ----------
 USE_SIMPLEAUDIO = False
+USE_WINSOUND = False
+try:
+    import winsound
+    USE_WINSOUND = True
+except Exception:
+    USE_WINSOUND = False
+
 try:
     import simpleaudio as sa
     USE_SIMPLEAUDIO = True
@@ -33,22 +42,29 @@ if USE_SIMPLEAUDIO:
     _BEEP_WAV, _BEEP_SR = _build_beep_wave()
 
 def play_beep_nonblocking():
+    if USE_WINSOUND:
+        try:
+            winsound.Beep(1000, 150)  # freq, ms (blocking but short)
+            return
+        except Exception:
+            pass
     if USE_SIMPLEAUDIO and _BEEP_WAV is not None:
         try:
             sa.play_buffer(_BEEP_WAV, 1, 2, _BEEP_SR)
+            return
         except Exception:
-            sys.stdout.write('\a'); sys.stdout.flush()
-    else:
-        sys.stdout.write('\a'); sys.stdout.flush()
+            pass
+    # Console bell fallback
+    sys.stdout.write('\a'); sys.stdout.flush()
 
 # -------------------- Device --------------------
 def get_best_device():
     if torch.cuda.is_available(): return torch.device("cuda")
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): return torch.device("mps")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available(): return torch.device("mps")
     return torch.device("cpu")
 device = get_best_device()
 
-# -------------------- Model (matches your notebook’s Multitask model) --------------------
+# -------------------- Model --------------------
 class MultitaskDrowsinessModel(nn.Module):
     def __init__(self, landmark_dim=18):
         super().__init__()
@@ -88,6 +104,7 @@ def find_checkpoint():
     for p in candidates:
         if p.exists(): return p
     sys.exit("Checkpoint not found at any expected path.")
+
 def load_model():
     model = MultitaskDrowsinessModel().to(device)
     ckpt_path = find_checkpoint()
@@ -97,11 +114,11 @@ def load_model():
     print(f"✅ Loaded checkpoint: {ckpt_path} on {device}")
     return model
 
-# -------------------- MediaPipe (for landmarks / geometry) --------------------
+# -------------------- MediaPipe --------------------
 try:
     import mediapipe as mp
 except Exception:
-    sys.exit("Please install mediapipe: python3 -m pip install mediapipe")
+    sys.exit("Please install mediapipe: python -m pip install mediapipe")
 
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh_full   = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
@@ -122,6 +139,7 @@ eval_tfm = transforms.Compose([
 
 # -------------------- Geometry helpers --------------------
 def clamp(v, lo, hi): return max(lo, min(hi, v))
+
 def bbox_from_points(pts_px: np.ndarray, pad_scale: float, w: int, h: int):
     x_min, y_min = float(pts_px[:,0].min()), float(pts_px[:,1].min())
     x_max, y_max = float(pts_px[:,0].max()), float(pts_px[:,1].max())
@@ -131,10 +149,12 @@ def bbox_from_points(pts_px: np.ndarray, pad_scale: float, w: int, h: int):
     x1, y1 = int(clamp(x_min - px, 0, w-1)), int(clamp(y_min - py, 0, h-1))
     x2, y2 = int(clamp(x_max + px, 1, w)),   int(clamp(y_max + py, 1, h))
     return x1, y1, x2, y2
+
 def union_boxes(b1, b2):
     x1 = min(b1[0], b2[0]); y1 = min(b1[1], b2[1])
     x2 = max(b1[2], b2[2]); y2 = max(b1[3], b2[3])
     return (x1, y1, x2, y2)
+
 def face_bbox_from_all_points(pts_px: np.ndarray, w: int, h: int, scale: float=1.20):
     x_min, y_min = float(pts_px[:,0].min()), float(pts_px[:,1].min())
     x_max, y_max = float(pts_px[:,0].max()), float(pts_px[:,1].max())
@@ -154,6 +174,7 @@ def extract_18y_from_crop(crop_bgr: np.ndarray) -> np.ndarray:
     lms = res.multi_face_landmarks[0].landmark
     ys = [lms[idx].y for idx in LM_18]
     return np.array(ys, dtype=np.float32)
+
 def prepare_img_tensor(crop_bgr: np.ndarray) -> torch.Tensor:
     pil = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
     return eval_tfm(pil).unsqueeze(0).to(device)
@@ -225,35 +246,41 @@ def _panel_dims(lines, bar_w=260, bar_h=16, pad=10, text_h=26, gap=10):
     total_w = bar_w + 2*pad
     return total_w, total_h, pad, text_h, gap, bar_h
 
-def _place_panel_beside_box(frame_w, frame_h, box, prefer_side="right", offset=14, panel_w=260, panel_h=120, margin=8):
-    """Place the panel beside the box on the preferred side; flip if no space.
-       Keeps same vertical center as the box; clamps to frame; ensures no overlap."""
-    x1,y1,x2,y2 = box
-    mid_y = (y1 + y2) // 2
-    # Try preferred side first
+def _place_panel_outside_box(frame_w, frame_h, face_box, prefer_side="right",
+                             offset=14, panel_w=260, panel_h=120, margin=8, mid_y=0):
+    """Place the panel strictly outside the face_box; clamp to frame."""
+    fx1, fy1, fx2, fy2 = face_box
+    # Try preferred side, flip if needed
     if prefer_side == "right":
-        px1 = x2 + offset
+        px1 = fx2 + offset
         if px1 + panel_w + margin > frame_w:
-            px1 = max(x1 - offset - panel_w, margin)  # flip to left
+            px1 = max(fx1 - offset - panel_w, margin)
     else:
-        px1 = max(x1 - offset - panel_w, margin)
+        px1 = max(fx1 - offset - panel_w, margin)
         if px1 < margin:
-            px1 = min(x2 + offset, frame_w - panel_w - margin)  # flip to right
-
+            px1 = min(fx2 + offset, frame_w - panel_w - margin)
     py1 = int(mid_y - panel_h/2)
-    # Clamp vertically
     py1 = max(margin, min(py1, frame_h - panel_h - margin))
-    return int(px1), int(py1), int(px1 + panel_w), int(py1 + panel_h), mid_y
+    return int(px1), int(py1), int(px1 + panel_w), int(py1 + panel_h)
 
-def draw_panel_aligned(frame, box, lines, prefer_side="right", offset=14, bar_w=260):
+def draw_panel_aligned(frame,
+                       placement_box: Tuple[int,int,int,int],
+                       leader_box: Tuple[int,int,int,int],
+                       lines,
+                       prefer_side="right", offset=14, bar_w=260):
     """
-    Draws a compact side panel horizontally aligned with the box's vertical center,
-    placed just beside the box (no overlap). Returns the panel rect and the
-    horizontal leader line endpoints (for a single straight line).
+    Place panel beside `placement_box` (outside it), but align leader line horizontally
+    to the vertical center of `leader_box`.
     """
     H, W = frame.shape[:2]
     panel_w, panel_h, pad, text_h, gap, bar_h = _panel_dims(lines, bar_w=bar_w)
-    px1, py1, px2, py2, mid_y = _place_panel_beside_box(W, H, box, prefer_side, offset, panel_w, panel_h)
+
+    lbx1, lby1, lbx2, lby2 = leader_box
+    leader_mid_y = (lby1 + lby2) // 2
+
+    px1, py1, px2, py2 = _place_panel_outside_box(
+        W, H, placement_box, prefer_side, offset, panel_w, panel_h, margin=8, mid_y=leader_mid_y
+    )
 
     # Background
     overlay = frame.copy()
@@ -268,23 +295,19 @@ def draw_panel_aligned(frame, box, lines, prefer_side="right", offset=14, bar_w=
         cv2.putText(frame, f"{label}: {value*100:.1f}%", (x_text, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.85, WHITE, 2)
         yb = y + 8
-        # bar background
         cv2.rectangle(frame, (x_text, yb), (px2 - pad, yb + bar_h), (80,80,80), -1)
-        # bar fill
         bw = int((px2 - pad - x_text) * float(np.clip(value, 0, 1)))
         cv2.rectangle(frame, (x_text, yb), (x_text + bw, yb + bar_h), color, -1)
-        # border
         cv2.rectangle(frame, (x_text, yb), (px2 - pad, yb + bar_h), WHITE, 1)
         y += text_h + bar_h + gap
 
-    # Leader line (horizontal only)
-    bx1, by1, bx2, by2 = box
-    if px1 >= bx2:  # panel is to the RIGHT of box
-        p_src = (bx2, mid_y)
-        p_dst = (px1, mid_y)
-    else:          # panel is to the LEFT of box
-        p_src = (bx1, mid_y)
-        p_dst = (px2, mid_y)
+    # Leader line (horizontal only) from leader_box to panel edge
+    if px1 >= placement_box[2]:  # panel to the RIGHT of face
+        p_src = (lbx2, leader_mid_y)
+        p_dst = (px1, leader_mid_y)
+    else:                        # panel to the LEFT of face
+        p_src = (lbx1, leader_mid_y)
+        p_dst = (px2, leader_mid_y)
     cv2.line(frame, p_src, p_dst, WHITE, 2)
 
     return (px1, py1, px2, py2)
@@ -357,21 +380,20 @@ def main():
         draw_box(frame, regions["eyes"],  CYAN, 2)
         draw_box(frame, regions["mouth"], MAG,  2)
 
-        # ------- Side panels aligned with boxes (same Y center). Horizontal leaders only. -------
-        # Face panel (prefer left), Eyes panel (prefer right), Mouth panel (prefer left)
+        # ------- Panels: place OUTSIDE face_box; lead to respective regions -------
         draw_panel_aligned(
-            frame, face_box,
+            frame, face_box, face_box,
             [("Alert", 1.0 - drowsy_prob, GREEN), ("Drowsy", drowsy_prob, RED)],
             prefer_side="left", offset=14, bar_w=300
         )
         draw_panel_aligned(
-            frame, regions["eyes"],
+            frame, face_box, regions["eyes"],
             [("Eyes Open",  rconfs["eyes"]["Eyes Open"],  CYAN),
              ("Eyes Closed", rconfs["eyes"]["Eyes Closed"], AMBER)],
             prefer_side="right", offset=14, bar_w=300
         )
         draw_panel_aligned(
-            frame, regions["mouth"],
+            frame, face_box, regions["mouth"],
             [("Mouth Closed", rconfs["mouth"]["Mouth Closed"], GREEN),
              ("Yawn",          rconfs["mouth"]["Yawn"],         MAG)],
             prefer_side="left", offset=14, bar_w=300
