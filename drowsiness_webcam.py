@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Pygame FULLSCREEN renderer (no OpenCV window).
-# Keeps: aligned side panels + horizontal leader lines + bottom-left state + beep/timer.
+# Panels pinned to screen edges (no overlap with face) + smaller labels.
+# "Uncertain" ONLY shown with Eye labels (not Face, not Mouth).
 
 import sys, time, math
 from pathlib import Path
@@ -60,13 +61,13 @@ class MultitaskDrowsinessModel(nn.Module):
         )
         comb = 512 + 32
         self.drowsy_head = nn.Sequential(
-            nn.Linear(comb, 256), nn.ReLU(), nn.Dropout(0.4), nn.Linear(256, 2)
+            nn.Linear(comb, 256), nn.ReLU(), nn.Dropout(0.4), nn.Linear(256, 2)   # [Drowsy(0), Alert(1)]
         )
         self.eye_head = nn.Sequential(
-            nn.Linear(comb, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 3)
+            nn.Linear(comb, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 3)  # [Closed(0), Open(1), Uncertain(2)]
         )
         self.mouth_head = nn.Sequential(
-            nn.Linear(comb, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 3)
+            nn.Linear(comb, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 3)  # [Closed(0), Yawn(1), Uncertain(2)]
         )
     def forward(self, x, landmarks):
         f_img = self.backbone(x).flatten(1)
@@ -149,6 +150,7 @@ def extract_18y_from_crop(crop_bgr):
     lms = res.multi_face_landmarks[0].landmark
     ys = [lms[idx].y for idx in LM_18]
     return np.array(ys, dtype=np.float32)
+
 def prepare_img_tensor(crop_bgr):
     pil = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
     return eval_tfm(pil).unsqueeze(0).to(device)
@@ -161,71 +163,111 @@ def predict_on_frame(model, frame_bgr):
         return "No face", None, None, None, None, None
     mesh = res.multi_face_landmarks[0].landmark
     pts = np.array([[lm.x * w, lm.y * h] for lm in mesh], dtype=np.float32)
+
+    # Face/region boxes
     fx1, fy1, fx2, fy2 = face_bbox_from_all_points(pts, w, h, 1.20)
     crop = frame_bgr[fy1:fy2, fx1:fx2]
-    if crop.size == 0: return "No face", None, None, None, None, None
+    if crop.size == 0:
+        return "No face", None, None, None, None, None
+
     left_pts, right_pts, mouth_pts = pts[LM_LEFT_EYE], pts[LM_RIGHT_EYE], pts[LM_MOUTH]
     lx1, ly1, lx2, ly2 = bbox_from_points(left_pts, 1.4, w, h)
     rx1, ry1, rx2, ry2 = bbox_from_points(right_pts, 1.4, w, h)
     eyes_box = union_boxes((lx1,ly1,lx2,ly2), (rx1,ry1,rx2,ry2))
     mx1, my1, mx2, my2 = bbox_from_points(mouth_pts, 1.55, w, h)
     region_boxes = {"eyes": eyes_box, "mouth": (mx1,my1,mx2,my2)}
+
+    # Model inputs
     lm18 = extract_18y_from_crop(crop)
     img_t, lm_t = prepare_img_tensor(crop), torch.from_numpy(lm18).unsqueeze(0).to(device)
+
+    # Inference
     with torch.no_grad():
         logits_d, logits_e, logits_m = model(img_t, lm_t)
-        probs_d = F.softmax(logits_d, dim=1)[0].cpu().numpy()
-        probs_e = F.softmax(logits_e, dim=1)[0].cpu().numpy()
-        probs_m = F.softmax(logits_m, dim=1)[0].cpu().numpy()
+        probs_d = F.softmax(logits_d, dim=1)[0].cpu().numpy()   # [Drowsy, Alert]
+        probs_e = F.softmax(logits_e, dim=1)[0].cpu().numpy()   # [Closed, Open, Uncertain]
+        probs_m = F.softmax(logits_m, dim=1)[0].cpu().numpy()   # [Closed, Yawn, Uncertain]
+
     pred_id = int(np.argmax(probs_d))
     label = "Alert" if pred_id == 1 else "Drowsy"
-    confs = {"Drowsy": float(probs_d[0]), "Alert": float(probs_d[1])}
+
+    # Overall face confidences (no 'Uncertain' here)
+    confs = {
+        "Drowsy": float(probs_d[0]),
+        "Alert":  float(probs_d[1]),
+    }
+
+    # Region-wise confidences; 'Uncertain' ONLY for eyes
     region_confs = {
-        "eyes": {"Eyes Open": float(probs_e[1]), "Eyes Closed": float(probs_e[0])},
-        "mouth": {"Yawn": float(probs_m[1]), "Mouth Closed": float(probs_m[0])},
+        "eyes": {
+            "Eyes Open":   float(probs_e[1]),
+            "Eyes Closed": float(probs_e[0]),
+            "Uncertain":   float(probs_e[2]),
+        },
+        "mouth": {
+            "Mouth Closed": float(probs_m[0]),
+            "Yawn":         float(probs_m[1]),
+            # NO 'Uncertain' displayed for mouth per request
+        },
     }
     return label, pred_id, (fx1, fy1, fx2, fy2), confs, region_boxes, region_confs
 
 # -------------------- Visual helpers --------------------
 WHITE=(255,255,255); GREEN=(60,200,60); RED=(0,0,230)
 CYAN=(255,255,0); MAG=(255,0,180); AMBER=(0,200,255)
+
 def draw_box(f, b, c, t=2): cv2.rectangle(f, (b[0],b[1]), (b[2],b[3]), c, t)
-def draw_label(f, text, org, color=WHITE, scale=1.0, thick=2):
+def draw_label(f, text, org, color=WHITE, scale=0.8, thick=2):
     cv2.putText(f, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
 def draw_status_bottom_left(f, s, d):
     H,_ = f.shape[:2]; base=H-40
     c=RED if s=="Drowsy" else GREEN
-    cv2.putText(f,f"State: {s}",(20,base),cv2.FONT_HERSHEY_SIMPLEX,1.2,c,3)
-    cv2.putText(f,f"Drowsy Time: {d:.1f}s",(20,base+35),cv2.FONT_HERSHEY_SIMPLEX,1.0,WHITE,2)
-def draw_fps(f,fps): draw_label(f,f"FPS {fps:.1f}",(20,40),WHITE,0.9,2)
+    cv2.putText(f,f"State: {s}",(20,base),cv2.FONT_HERSHEY_SIMPLEX,1.0,c,3)
+    cv2.putText(f,f"Drowsy Time: {d:.1f}s",(20,base+30),cv2.FONT_HERSHEY_SIMPLEX,0.9,WHITE,2)
+def draw_fps(f,fps): draw_label(f,f"FPS {fps:.1f}",(20,40),WHITE,0.8,2)
 
-# -------------------- Panel drawing --------------------
-def draw_panel_aligned(frame, box, lines, side="right", offset=14, bar_w=300):
-    H,W=frame.shape[:2]; pad=12; text_h=26; gap=10; bar_h=16
+# -------------------- Panel drawing (PINNED TO SCREEN EDGE) --------------------
+def draw_panel_aligned(frame, box, lines, side="right", bar_w=220):
+    """
+    Draw a compact panel pinned to the screen edge (so it never overlaps the face).
+    side = 'right' pins at right edge; 'left' pins at left edge.
+    """
+    H,W=frame.shape[:2]
+    pad=10; text_h=18; gap=8; bar_h=12
     panel_h=pad*2+len(lines)*(text_h+bar_h+gap)-gap; panel_w=bar_w+2*pad
-    x1,y1,x2,y2=box; mid_y=(y1+y2)//2
+
+    # Pin to the screen edge
     if side=="right":
-        px1=x2+offset
-        if px1+panel_w>W: px1=max(x1-offset-panel_w,8)
+        px1=W-panel_w-8
     else:
-        px1=max(x1-offset-panel_w,8)
-        if px1<8: px1=min(x2+offset,W-panel_w-8)
+        px1=8
+    # Vertically center to the target box midline
+    x1,y1,x2,y2=box
+    mid_y=(y1+y2)//2
     py1=max(8,min(int(mid_y-panel_h/2),H-panel_h-8))
     px2,py2=px1+panel_w,py1+panel_h
-    overlay=frame.copy(); cv2.rectangle(overlay,(px1,py1),(px2,py2),(20,20,20),-1)
-    cv2.addWeighted(overlay,0.6,frame,0.4,0,frame); cv2.rectangle(frame,(px1,py1),(px2,py2),WHITE,1)
-    x_text,y=px1+pad,py1+pad+20
+
+    # Panel body
+    overlay=frame.copy()
+    cv2.rectangle(overlay,(px1,py1),(px2,py2),(20,20,20),-1)
+    cv2.addWeighted(overlay,0.6,frame,0.4,0,frame)
+    cv2.rectangle(frame,(px1,py1),(px2,py2),WHITE,1)
+
+    # Bars
+    x_text,y=px1+pad,py1+pad+14
     for label,value,color in lines:
-        cv2.putText(frame,f"{label}: {value*100:.1f}%",(x_text,y),cv2.FONT_HERSHEY_SIMPLEX,0.95,WHITE,2)
-        yb=y+8
+        cv2.putText(frame,f"{label}: {value*100:.1f}%",(x_text,y),cv2.FONT_HERSHEY_SIMPLEX,0.8,WHITE,2)
+        yb=y+6
         cv2.rectangle(frame,(x_text,yb),(px2-pad,yb+bar_h),(80,80,80),-1)
         bw=int((px2-pad-x_text)*float(np.clip(value,0,1)))
         cv2.rectangle(frame,(x_text,yb),(x_text+bw,yb+bar_h),color,-1)
         cv2.rectangle(frame,(x_text,yb),(px2-pad,yb+bar_h),WHITE,1)
         y+=text_h+bar_h+gap
+
+    # Leader line from face box to panel edge
     bx1,by1,bx2,by2=box
-    p_src=(bx2,mid_y) if px1>=bx2 else (bx1,mid_y)
-    p_dst=(px1,mid_y) if px1>=bx2 else (px2,mid_y)
+    p_src=(bx2, (by1+by2)//2) if side=="right" else (bx1, (by1+by2)//2)
+    p_dst=(px1, (py1+py2)//2) if side=="right" else (px2, (py1+py2)//2)
     cv2.line(frame,p_src,p_dst,WHITE,2)
 
 # -------------------- Pygame display helpers --------------------
@@ -251,39 +293,77 @@ def main():
     screen = pygame.display.set_mode((0,0), pygame.FULLSCREEN)
     screen_w, screen_h = screen.get_size()
     clock = pygame.time.Clock()
+
     drowsy_time=0.0; last_beep=0.0
-    BEEP_INTERVAL=0.25; BEEP_START_SEC=3.0; DROWSY_THRESH=0.60
+    BEEP_INTERVAL=0.25
+    BEEP_START_SEC=3.0
+    DROWSY_THRESH=0.60
+    CONF_MARGIN=0.15   # require separation to consider it confident
     fps=0.0; t_last=time.time()
 
     while True:
         for e in pygame.event.get():
             if e.type==pygame.QUIT: return
             if e.type==pygame.KEYDOWN and e.key in (pygame.K_q,pygame.K_ESCAPE): return
+
         ok,frame=cap.read()
         if not ok: break
         work=frame.copy()
+
         t_now=time.time(); dt=t_now-t_last; t_last=t_now
         if dt>0: fps=0.9*fps+0.1*(1.0/dt) if fps>0 else (1.0/dt)
+
         label,pred,face_box,confs,regions,rconfs=predict_on_frame(model,work)
+
         if pred is None:
-            draw_label(work,"No face",(30,80),AMBER,1.1,2)
+            draw_label(work,"No face",(30,80),AMBER,0.9,2)
             draw_fps(work,fps); draw_status_bottom_left(work,"Alert",0.0)
         else:
-            dprob=confs["Drowsy"]; active=dprob>=DROWSY_THRESH
+            dprob=confs["Drowsy"]
+            margin=abs(confs["Drowsy"] - confs["Alert"])
+            confident = (margin >= CONF_MARGIN)
+            active = (dprob >= DROWSY_THRESH) and confident
+
             if active:
                 drowsy_time+=dt
                 if drowsy_time>=BEEP_START_SEC and (t_now-last_beep)>=BEEP_INTERVAL:
                     play_beep_nonblocking(); last_beep=t_now
-            else: drowsy_time=0.0
+            else:
+                drowsy_time=0.0
+
             color_face=GREEN if pred==1 else RED
             draw_box(work,face_box,color_face,2)
             draw_box(work,regions["eyes"],CYAN,2)
             draw_box(work,regions["mouth"],MAG,2)
-            draw_panel_aligned(work,face_box,[("Alert",1.0-dprob,GREEN),("Drowsy",dprob,RED)],"left",14,300)
-            draw_panel_aligned(work,regions["eyes"],[("Eyes Open",rconfs["eyes"]["Eyes Open"],CYAN),("Eyes Closed",rconfs["eyes"]["Eyes Closed"],AMBER)],"right",14,300)
-            draw_panel_aligned(work,regions["mouth"],[("Mouth Closed",rconfs["mouth"]["Mouth Closed"],GREEN),("Yawn",rconfs["mouth"]["Yawn"],MAG)],"left",14,300)
+
+            # Face panel (LEFT EDGE): Alert vs Drowsy only
+            draw_panel_aligned(
+                work, face_box,
+                [("Alert",  confs["Alert"],  GREEN),
+                 ("Drowsy", dprob,           RED)],
+                side="left", bar_w=220
+            )
+
+            # Eyes panel (RIGHT EDGE): Open, Closed, Uncertain
+            draw_panel_aligned(
+                work, regions["eyes"],
+                [("Eyes Open",   rconfs["eyes"]["Eyes Open"],   CYAN),
+                 ("Eyes Closed", rconfs["eyes"]["Eyes Closed"], AMBER),
+                 ("Uncertain",   rconfs["eyes"]["Uncertain"],   WHITE)],
+                side="right", bar_w=220
+            )
+
+            # Mouth panel (LEFT EDGE by mouth box midline): Closed, Yawn (no Uncertain)
+            draw_panel_aligned(
+                work, regions["mouth"],
+                [("Mouth Closed", rconfs["mouth"]["Mouth Closed"], GREEN),
+                 ("Yawn",         rconfs["mouth"]["Yawn"],         MAG)],
+                side="left", bar_w=220
+            )
+
             draw_status_bottom_left(work,"Drowsy" if active else "Alert",drowsy_time)
             draw_fps(work,fps)
+
         rgb=cv2.cvtColor(work,cv2.COLOR_BGR2RGB)
         frame_surf=pygame.image.frombuffer(rgb.tobytes(),(rgb.shape[1],rgb.shape[0]),'RGB')
         fitted=scale_fit_surface(frame_surf,screen_w,screen_h)
