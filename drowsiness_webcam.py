@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Pygame FULLSCREEN renderer (no OpenCV window).
 # Compact glass UI + face box (green=Alert, red=Drowsy).
+#newstver
 
 import sys, time, math
 from pathlib import Path
