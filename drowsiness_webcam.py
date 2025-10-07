@@ -153,21 +153,22 @@ def bar_line(frame,x,y,w,label,val,color):
                 cv2.FONT_HERSHEY_SIMPLEX,VALUE_SCALE,WHITE,1,cv2.LINE_AA)
 
 # ---------- Prediction ----------
-def predict_on_frame(model,frame):
-    h,w=frame.shape[:2]
-    rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
-    res=face_mesh_full.process(rgb)
+def predict_on_frame(model, frame):
+    h, w = frame.shape[:2]
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    res = face_mesh_full.process(rgb)
     if not res.multi_face_landmarks:
-        return "No face",None,None,{"Drowsy":0.0,"Alert":1.0},{
-            "eyes":{"Eyes Open":0.0,"Eyes Closed":0.0,"Uncertain":0.0},
-            "mouth":{"Mouth Closed":0.0,"Yawn":0.0}}
+        return "No face", None, {"Drowsy": 0.0, "Alert": 1.0}, {
+            "eyes": {"Eyes Open": 0.0, "Eyes Closed": 0.0, "Uncertain": 0.0},
+            "mouth": {"Mouth Closed": 0.0, "Yawn": 0.0}}
     mesh=res.multi_face_landmarks[0].landmark
     pts=np.array([[lm.x*w,lm.y*h] for lm in mesh],dtype=np.float32)
     x1,y1,x2,y2=face_bbox_from_all_points(pts,w,h)
-    crop=frame[y1:y2,x1:x2]
-    if crop.size==0: return "No face",None,(x1,y1,x2,y2),{"Drowsy":0.0,"Alert":1.0},{
-        "eyes":{"Eyes Open":0.0,"Eyes Closed":0.0,"Uncertain":0.0},
-        "mouth":{"Mouth Closed":0.0,"Yawn":0.0}}
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0: 
+        return "No face", (x1, y1, x2, y2), {"Drowsy": 0.0, "Alert": 1.0}, {
+            "eyes": {"Eyes Open": 0.0, "Eyes Closed": 0.0, "Uncertain": 0.0},
+            "mouth": {"Mouth Closed": 0.0, "Yawn": 0.0}}
     lm18=extract_18y_from_crop(crop)
     img_t,lm_t=prepare_img_tensor(crop),torch.from_numpy(lm18).unsqueeze(0).to(device)
     with torch.no_grad():
