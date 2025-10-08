@@ -16,19 +16,19 @@
     "fusion_w_eye": 0.25,
     "fusion_w_mouth": 0.15
   },
-  "best_epoch": 8,
-  "best_val_acc": 0.956989247311828,
-  "test_acc_base": 0.9641350210970464,
-  "test_acc_fused": 0.9578059071729957,
-  "improvement": -0.006329113924050667,
+  "best_epoch": 6,
+  "best_val_acc": 0.9516129032258065,
+  "test_acc_base": 0.9578059071729957,
+  "test_acc_fused": 0.9556962025316456,
+  "improvement": -0.002109704641350185,
   "confusion_matrix_base": [
     [
-      220,
-      14
+      218,
+      16
     ],
     [
-      3,
-      237
+      4,
+      236
     ]
   ],
   "confusion_matrix_fused": [
@@ -37,8 +37,8 @@
       19
     ],
     [
-      1,
-      239
+      2,
+      238
     ]
   ]
 }
