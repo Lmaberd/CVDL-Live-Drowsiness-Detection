@@ -98,14 +98,15 @@ Single-frame classification is noisy. To prevent false alarms, we implemented a 
 ## 🏗️ Simplified Runtime Architecture
 
 The system operates as a linear pipeline during live execution:
-``` mermaid
+```mermaid
 flowchart LR
-    A [Camera Input] --> B[YOLOv8 Detector]
-    B -- Detections --> C[Feature Extractor]
-    C -- Vector --> D[Fusion MLP Classifier]
+    A[Webcam Input] --> B[YOLOv8s Detector]
+    B --> C{Feature Extraction}
+    C -- Counts & Confidences --> D[Fusion MLP]
     D -- Raw Probability --> E[Temporal Smoothing]
-    E -- Smoothed Score --> F[State Machine]
-    F -- Alert/Drowsy --> G[HUD & Audio]
+    E --> F[State Machine]
+    F -- PERCLOS > 0.4 OR Yawns > 3/min --> G[Trigger Alarm]
+    F -- Normal --> H[Status: Alert]
 ```
 1. **Input**: Captures frame from webcam.
 
