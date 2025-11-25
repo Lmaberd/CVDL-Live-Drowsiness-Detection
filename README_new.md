@@ -74,7 +74,7 @@ Single-frame classification is noisy. To prevent false alarms, we implemented a 
 
 ## 📂 Repository Structure
 
-```
+```text
 .
 ├── YOLO_v8_setup.ipynb          # MAIN FILE: Contains Data Prep, Training, Eval, and HUD
 ├── fusion_mlp_final.pth         # Trained MLP Weights
@@ -98,7 +98,7 @@ Single-frame classification is noisy. To prevent false alarms, we implemented a 
 ## 🏗️ Simplified Runtime Architecture
 
 The system operates as a linear pipeline during live execution:
-```
+``` mermaid
 flowchart LR
     A [Camera Input] --> B[YOLOv8 Detector]
     B -- Detections --> C[Feature Extractor]
@@ -163,13 +163,13 @@ The system features a custom **OpenCV-based Head-Up Display (HUD)** designed to 
 ## Installation & Usage
 
 ### 1. Install Dependencies
-``` 
+``` bash
 pip install ultralytics==8.3.40 opencv-python torch torchvision numpy pandas scikit-learn optuna matplotlib seaborn tqdm pillow pyttsx3==2.90
 ```
 ### 2. Run the Project
 
 #### 1. Clone the repository:
-``` 
+``` bash
 git clone [https://github.com/Lmaberd/CVDL-Live-Drowsiness-Detection.git](https://github.com/Lmaberd/CVDL-Live-Drowsiness-Detection.git)
 ```
 #### 2. Open `YOLO_v8_setup.ipynb` in Jupyter Notebook.
