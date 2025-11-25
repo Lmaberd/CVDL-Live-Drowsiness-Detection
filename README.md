@@ -116,7 +116,7 @@ To validate our choice of backbone, we benchmarked YOLOv8 against a traditional 
 | **Confidence** | High (0.73 avg) | Moderate (0.65 avg) | YOLO detections flickered less between frames. |
 | **Artifacts** | Low | High | Faster R-CNN often predicted multiple overlapping boxes for the same eye. |
 
-**Note:** Note that the exact values each time the demo runs, so average values are taken instead.
+**Note:** Note that the exact values changes each time the demo runs, so average values are taken instead.
 
 **Conclusion:** YOLOv8 was selected as the primary backbone for its superior real-time performance.
 
