@@ -6,6 +6,74 @@ The entire pipeline—from dataset conversion and hyperparameter tuning to the f
 
 `YOLO_v8_setup.ipynb`
 
+## Repository Structure
+
+```text
+.
+├── YOLO_v8_setup.ipynb          # MAIN FILE: Contains Data Prep, Training, Eval, and HUD
+├── fusion_mlp_final.pth         # Trained MLP Weights
+├── model/
+│   └── yolo/
+│       └── final_best_model6/
+│           └── weights/
+│               └── best.pt      # Trained YOLOv8 Weights
+├── font/
+│   └── Audiowide-Regular.ttf    # Custom font for HUD
+└── data/
+    ├── labeled_images/          # Raw Images & JSONs
+    └── yolo_splits/             # Processed YOLO Dataset
+```
+**Runtime Outputs:**
+
+- fusion_yolo_features.csv: Extracted feature set used for MLP training.
+
+- drowsiness_log.csv: Real-time log of driver state during webcam execution.
+
+## Training Pipeline
+
+This diagram illustrates the complete workflow contained in `YOLO_v8_setup.ipynb`, including the benchmarking branch and the hybrid feature fusion strategy.
+
+```mermaid
+flowchart TD
+    %% Data Preparation Phase
+    subgraph Data_Prep [1. Data Preparation]
+        A[Raw COCO Dataset] --> B[Filter Classes]
+        B -- face, eyes, mouth --> C[Convert to YOLO Format]
+        C --> D[Split Train/Val/Test]
+    end
+
+    %% Model Training Phase (Parallel)
+    subgraph Training [2. Object Detector Training & Benchmarking]
+        D --> E{Model Selection}
+        
+        %% YOLO Branch
+        E -- Path A (Selected) --> F[Optuna Search: YOLOv8]
+        F --> G[Train Final YOLOv8s]
+        G --> H[Save: best.pt]
+
+        %% Faster R-CNN Branch
+        E -- Path B (Benchmark) --> I[Optuna Search: Faster R-CNN]
+        I --> J[Train ResNet50-FPN]
+        J --> K[Save: fasterrcnn_final.pth]
+    end
+
+    %% Comparison
+    subgraph Eval [3. Evaluation]
+        H --> L{Webcam Benchmark}
+        K --> L
+        L -- YOLO Selected (148 FPS) --> M[Proceed to Fusion]
+    end
+
+    %% Fusion MLP Phase
+    subgraph Fusion [4. State Classifier Training]
+        M --> N[Run YOLO Inference on Dataset]
+        N -- Detections + GT State Labels --> O[Generate fusion_features.csv]
+        O --> P[Optuna Search: MLP]
+        P --> Q[Train Fusion MLP]
+        Q --> R[Save: fusion_mlp_final.pth]
+    end
+```
+
 ---
 
 ## Methodology & Logic
@@ -48,7 +116,7 @@ To validate our choice of backbone, we benchmarked YOLOv8 against a traditional 
 | **Confidence** | High (0.73 avg) | Moderate (0.65 avg) | YOLO detections flickered less between frames. |
 | **Artifacts** | Low | High | Faster R-CNN often predicted multiple overlapping boxes for the same eye. |
 
-**Note:** Note that the exact values changes after each run.
+**Note:** Note that the exact values each time the demo runs, so average values are taken instead.
 
 **Conclusion:** YOLOv8 was selected as the primary backbone for its superior real-time performance.
 
@@ -74,30 +142,7 @@ Single-frame classification is noisy. To prevent false alarms, we implemented a 
 
 ---
 
-## Repository Structure
-
-```text
-.
-├── YOLO_v8_setup.ipynb          # MAIN FILE: Contains Data Prep, Training, Eval, and HUD
-├── fusion_mlp_final.pth         # Trained MLP Weights
-├── model/
-│   └── yolo/
-│       └── final_best_model6/
-│           └── weights/
-│               └── best.pt      # Trained YOLOv8 Weights
-├── font/
-│   └── Audiowide-Regular.ttf    # Custom font for HUD
-└── data/
-    ├── labeled_images/          # Raw Images & JSONs
-    └── yolo_splits/             # Processed YOLO Dataset
-```
-**Runtime Outputs:**
-
-- fusion_yolo_features.csv: Extracted feature set used for MLP training.
-
-- drowsiness_log.csv: Real-time log of driver state during webcam execution.
-
-## Simplified Runtime Architecture
+## Runtime Model Flow
 
 The system operates as a linear pipeline during live execution:
 ``` mermaid
